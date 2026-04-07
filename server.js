@@ -284,6 +284,74 @@ app.post('/slack/command', async (req, res) => {
   }
 });
 
+// Handle /seedadmin command - shows dashboard
+app.post('/slack/admin', async (req, res) => {
+  const { user_id } = req.body;
+  
+  // Only allow specific user
+  if (user_id !== SLACK_USER_ID) {
+    res.json({
+      response_type: 'ephemeral',
+      text: '❌ You do not have permission to access the admin dashboard.'
+    });
+    return;
+  }
+  
+  try {
+    // Fetch pending requests
+    const { data: requests, error } = await supabase
+      .from('seed_requests')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(20);
+    
+    if (error) throw error;
+    
+    const pending = requests.filter(r => r.status === 'pending');
+    const processing = requests.filter(r => r.status === 'processing');
+    const shipped = requests.filter(r => r.status === 'shipped');
+    
+    let text = `📊 *Seed Request Dashboard*\n\n`;
+    text += `📦 Total: ${requests.length} | ⏳ Pending: ${pending.length} | 🔄 Processing: ${processing.length} | ✅ Shipped: ${shipped.length}\n\n`;
+    
+    if (pending.length > 0) {
+      text += `*🔴 Pending Requests:*\n`;
+      pending.slice(0, 5).forEach(req => {
+        text += `• #${req.id} - ${req.recipient.name} ${req.urgent ? '🚨' : ''}\n`;
+        text += `  From: ${req.submitter} | ${new Date(req.created_at).toLocaleDateString()}\n\n`;
+      });
+    }
+    
+    if (processing.length > 0) {
+      text += `*🟡 Processing:*\n`;
+      processing.slice(0, 3).forEach(req => {
+        text += `• #${req.id} - ${req.recipient.name}\n`;
+      });
+      text += `\n`;
+    }
+    
+    res.json({
+      response_type: 'ephemeral',
+      text: text,
+      blocks: [
+        {
+          type: "section",
+          text: {
+            type: "mrkdwn",
+            text: text
+          }
+        }
+      ]
+    });
+  } catch (error) {
+    console.error('Error fetching dashboard:', error);
+    res.json({
+      response_type: 'ephemeral',
+      text: '❌ Error loading dashboard. Please try again.'
+    });
+  }
+});
+
 // Handle interactive components (button clicks, modal submissions)
 app.post('/slack/interactive', async (req, res) => {
   const payload = JSON.parse(req.body.payload);
