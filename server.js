@@ -480,6 +480,86 @@ app.post('/slack/interactive', async (req, res) => {
   
   // Handle modal submission
   if (payload.type === 'view_submission') {
+    const callback_id = payload.view.callback_id;
+    
+    // Handle processing modal submission
+    if (callback_id === 'admin_processing_modal') {
+      const metadata = JSON.parse(payload.view.private_metadata);
+      const requestId = metadata.request_id;
+      const values = payload.view.state.values;
+      
+      const shopifyOrderId = values.shopify_order_id?.value?.value || null;
+      
+      const updateData = { status: 'processing' };
+      if (shopifyOrderId) {
+        updateData.shopify_order_id = shopifyOrderId;
+      }
+      
+      await supabase
+        .from('seed_requests')
+        .update(updateData)
+        .eq('id', requestId);
+      
+      // Send confirmation
+      await fetch('https://slack.com/api/chat.postMessage', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${SLACK_BOT_TOKEN}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          channel: SLACK_USER_ID,
+          text: `✅ Request #${requestId} marked as Processing${shopifyOrderId ? ` (Shopify: ${shopifyOrderId})` : ''}. Type /seedadmin to refresh.`
+        })
+      });
+      
+      return res.send('');
+    }
+    
+    // Handle shipped modal submission
+    if (callback_id === 'admin_shipped_modal') {
+      const metadata = JSON.parse(payload.view.private_metadata);
+      const requestId = metadata.request_id;
+      const values = payload.view.state.values;
+      
+      const courier = values.courier?.value?.selected_option?.value;
+      const trackingNumber = values.tracking_number?.value?.value;
+      
+      if (!courier || !trackingNumber) {
+        return res.status(200).json({
+          response_action: "errors",
+          errors: {
+            tracking_number: trackingNumber ? null : "Tracking number is required"
+          }
+        });
+      }
+      
+      await supabase
+        .from('seed_requests')
+        .update({
+          status: 'shipped',
+          courier: courier,
+          tracking_number: trackingNumber
+        })
+        .eq('id', requestId);
+      
+      // Send confirmation
+      await fetch('https://slack.com/api/chat.postMessage', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${SLACK_BOT_TOKEN}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          channel: SLACK_USER_ID,
+          text: `✅ Request #${requestId} marked as Shipped via ${courier} (${trackingNumber}). Type /seedadmin to refresh.`
+        })
+      });
+      
+      return res.send('');
+    }
+    
+    // Handle seed request submission
     const values = payload.view.state.values;
     const metadata = JSON.parse(payload.view.private_metadata);
     
@@ -775,54 +855,153 @@ app.post('/slack/interactive', async (req, res) => {
       return;
     }
     
-    // Admin start processing (from detail view)
+    // Admin start processing (from detail view) - open modal to collect Shopify ID
     if (action.action_id === 'admin_start_processing') {
       const requestId = action.value.split('_')[1];
       
-      // Update status
-      await supabase
-        .from('seed_requests')
-        .update({ status: 'processing' })
-        .eq('id', requestId);
+      // Open modal to collect Shopify Order ID
+      const modal = {
+        trigger_id: payload.trigger_id,
+        view: {
+          type: "modal",
+          callback_id: "admin_processing_modal",
+          private_metadata: JSON.stringify({ request_id: requestId }),
+          title: {
+            type: "plain_text",
+            text: "Start Processing"
+          },
+          submit: {
+            type: "plain_text",
+            text: "Update"
+          },
+          blocks: [
+            {
+              type: "input",
+              block_id: "shopify_order_id",
+              optional: true,
+              label: {
+                type: "plain_text",
+                text: "Shopify Order ID"
+              },
+              element: {
+                type: "plain_text_input",
+                action_id: "value",
+                placeholder: {
+                  type: "plain_text",
+                  text: "Enter Shopify order number (optional)"
+                }
+              }
+            }
+          ]
+        }
+      };
       
-      await fetch('https://slack.com/api/chat.postEphemeral', {
+      await fetch('https://slack.com/api/views.open', {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${SLACK_BOT_TOKEN}`,
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify({
-          channel: payload.channel.id,
-          user: payload.user.id,
-          text: `✅ Request #${requestId} marked as Processing. Type /seedadmin to refresh dashboard.`
-        })
+        body: JSON.stringify(modal)
       });
       
       res.send('');
       return;
     }
     
-    // Admin mark shipped
+    // Admin mark shipped - open modal to collect tracking info
     if (action.action_id === 'admin_mark_shipped') {
       const requestId = action.value.split('_')[1];
       
-      // Update status
-      await supabase
-        .from('seed_requests')
-        .update({ status: 'shipped' })
-        .eq('id', requestId);
+      // Open modal to collect tracking info
+      const modal = {
+        trigger_id: payload.trigger_id,
+        view: {
+          type: "modal",
+          callback_id: "admin_shipped_modal",
+          private_metadata: JSON.stringify({ request_id: requestId }),
+          title: {
+            type: "plain_text",
+            text: "Mark as Shipped"
+          },
+          submit: {
+            type: "plain_text",
+            text: "Update"
+          },
+          blocks: [
+            {
+              type: "input",
+              block_id: "courier",
+              label: {
+                type: "plain_text",
+                text: "Courier"
+              },
+              element: {
+                type: "static_select",
+                action_id: "value",
+                placeholder: {
+                  type: "plain_text",
+                  text: "Select courier"
+                },
+                options: [
+                  {
+                    text: {
+                      type: "plain_text",
+                      text: "UPS"
+                    },
+                    value: "UPS"
+                  },
+                  {
+                    text: {
+                      type: "plain_text",
+                      text: "FedEx"
+                    },
+                    value: "FedEx"
+                  },
+                  {
+                    text: {
+                      type: "plain_text",
+                      text: "USPS"
+                    },
+                    value: "USPS"
+                  },
+                  {
+                    text: {
+                      type: "plain_text",
+                      text: "DHL"
+                    },
+                    value: "DHL"
+                  }
+                ]
+              }
+            },
+            {
+              type: "input",
+              block_id: "tracking_number",
+              label: {
+                type: "plain_text",
+                text: "Tracking Number"
+              },
+              element: {
+                type: "plain_text_input",
+                action_id: "value",
+                placeholder: {
+                  type: "plain_text",
+                  text: "Enter tracking number"
+                }
+              }
+            }
+          ]
+        }
+      };
       
-      await fetch('https://slack.com/api/chat.postEphemeral', {
+      await fetch('https://slack.com/api/views.open', {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${SLACK_BOT_TOKEN}`,
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify({
-          channel: payload.channel.id,
-          user: payload.user.id,
-          text: `✅ Request #${requestId} marked as Shipped. Type /seedadmin to refresh dashboard.`
-        })
+        body: JSON.stringify(modal)
       });
       
       res.send('');
