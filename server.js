@@ -646,6 +646,10 @@ app.post('/slack/interactive', async (req, res) => {
     if (action.action_id === 'view_request_details') {
       const requestId = action.value.split('_')[1];
       
+      // Acknowledge immediately
+      res.send('');
+      
+      // Then fetch and send data
       try {
         const { data: request, error } = await supabase
           .from('seed_requests')
@@ -840,11 +844,9 @@ app.post('/slack/interactive', async (req, res) => {
           })
         });
         
-        res.send('');
-        return;
+        return; // Don't send response again
       } catch (error) {
         console.error('Error fetching request details:', error);
-        res.send('');
         return;
       }
     }
