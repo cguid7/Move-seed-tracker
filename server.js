@@ -20,6 +20,16 @@ const supabase = createClient(supabaseUrl, supabaseKey);
 const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
 const SLACK_USER_ID = process.env.SLACK_USER_ID;
 
+// Generate unique tracking code
+function generateTrackingCode() {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // Removed similar looking chars
+  let code = 'TR-';
+  for (let i = 0; i < 8; i++) {
+    code += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return code;
+}
+
 // Product options
 const insoleTypes = ['Game Day', 'All Day', 'Game Day Pro', 'Baseline'];
 const tshirtTypes = ['Always In Motion', 'Worldwide Athletics', 'No Shortcuts To Greatness'];
@@ -487,6 +497,7 @@ app.post('/slack/interactive', async (req, res) => {
       submitter: metadata.user_name,
       urgent: values.urgent?.value?.selected_options?.length > 0,
       status: 'pending',
+      tracking_code: generateTrackingCode(),
       recipient: {
         name: values.recipient_name.value.value,
         email: values.recipient_email.value.value
@@ -522,6 +533,21 @@ app.post('/slack/interactive', async (req, res) => {
       if (error) throw error;
       
       await sendSlackNotification(data[0]);
+      
+      // Send tracking link to submitter
+      const trackingUrl = `${process.env.APP_URL || 'https://move-seed-tracker.onrender.com'}/track/${data[0].tracking_code}`;
+      
+      await fetch('https://slack.com/api/chat.postMessage', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${SLACK_BOT_TOKEN}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          channel: metadata.user_id,
+          text: `✅ Your seed request has been submitted!\n\n*Track your request:*\n${trackingUrl}\n\nYou'll receive updates as your request is processed and shipped.`
+        })
+      });
       
       res.send('');
     } catch (error) {
@@ -925,6 +951,319 @@ app.post('/slack/interactive', async (req, res) => {
   res.send('');
 });
 
+// Tracking page
+app.get('/track/:code', async (req, res) => {
+  const { code } = req.params;
+  
+  try {
+    const { data: request, error } = await supabase
+      .from('seed_requests')
+      .select('*')
+      .eq('tracking_code', code)
+      .single();
+    
+    if (error || !request) {
+      res.send(`
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <title>Request Not Found - Move Insole</title>
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <style>
+            body {
+              font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+              background: linear-gradient(135deg, #340CA6 0%, #F20B5D 50%, #FD892B 100%);
+              min-height: 100vh;
+              display: flex;
+              align-items: center;
+              justify-content: center;
+              padding: 20px;
+            }
+            .container {
+              background: white;
+              padding: 40px;
+              border-radius: 16px;
+              max-width: 500px;
+              text-align: center;
+              box-shadow: 0 8px 30px rgba(0,0,0,0.2);
+            }
+            h1 { color: #F20B5D; margin-bottom: 20px; }
+            p { color: #4a5568; }
+          </style>
+        </head>
+        <body>
+          <div class="container">
+            <h1>❌ Request Not Found</h1>
+            <p>We couldn't find a seed request with tracking code: <strong>${code}</strong></p>
+            <p>Please check your tracking link and try again.</p>
+          </div>
+        </body>
+        </html>
+      `);
+      return;
+    }
+    
+    // Format products
+    let productsHTML = '';
+    if (request.products.insoles && request.products.insoles.length > 0) {
+      productsHTML += '<h3>Insoles:</h3><ul>';
+      request.products.insoles.forEach(p => {
+        productsHTML += `<li>${p.type} - ${p.size} (Qty: ${p.qty})</li>`;
+      });
+      productsHTML += '</ul>';
+    }
+    if (request.products.shirts && request.products.shirts.length > 0) {
+      productsHTML += '<h3>T-Shirts:</h3><ul>';
+      request.products.shirts.forEach(p => {
+        productsHTML += `<li>${p.type} - Size ${p.size} (Qty: ${p.qty})</li>`;
+      });
+      productsHTML += '</ul>';
+    }
+    if (request.products.socks && request.products.socks.length > 0) {
+      productsHTML += '<h3>Socks:</h3><ul>';
+      request.products.socks.forEach(p => {
+        productsHTML += `<li>${p.type} - ${p.size} (Qty: ${p.qty})</li>`;
+      });
+      productsHTML += '</ul>';
+    }
+    
+    const getTrackingUrl = (courier, trackingNumber) => {
+      const urls = {
+        'UPS': `https://www.ups.com/track?tracknum=${trackingNumber}`,
+        'FedEx': `https://www.fedex.com/fedextrack/?trknbr=${trackingNumber}`,
+        'USPS': `https://tools.usps.com/go/TrackConfirmAction?tLabels=${trackingNumber}`,
+        'DHL': `https://www.dhl.com/en/express/tracking.html?AWB=${trackingNumber}`
+      };
+      return urls[courier] || '#';
+    };
+    
+    const statusColor = request.status === 'pending' ? '#FD892B' : request.status === 'processing' ? '#340CA6' : '#48bb78';
+    const statusText = request.status === 'pending' ? 'Pending' : request.status === 'processing' ? 'Processing' : 'Shipped';
+    const statusIcon = request.status === 'pending' ? '⏳' : request.status === 'processing' ? '🔄' : '✅';
+    
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Track Request ${code} - Move Insole</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <style>
+          * { margin: 0; padding: 0; box-sizing: border-box; }
+          body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #340CA6 0%, #F20B5D 50%, #FD892B 100%);
+            min-height: 100vh;
+            padding: 20px;
+          }
+          .container {
+            max-width: 800px;
+            margin: 0 auto;
+          }
+          .card {
+            background: white;
+            border-radius: 16px;
+            padding: 30px;
+            margin-bottom: 20px;
+            box-shadow: 0 8px 30px rgba(0,0,0,0.15);
+          }
+          h1 {
+            background: linear-gradient(90deg, #340CA6 0%, #F20B5D 50%, #FD892B 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            font-size: 2em;
+            margin-bottom: 10px;
+          }
+          .tracking-code {
+            color: #718096;
+            font-size: 0.9em;
+            margin-bottom: 20px;
+          }
+          .status-badge {
+            display: inline-block;
+            padding: 10px 20px;
+            border-radius: 20px;
+            background: ${statusColor};
+            color: white;
+            font-weight: 700;
+            font-size: 1.1em;
+            margin: 20px 0;
+          }
+          .timeline {
+            margin: 30px 0;
+            position: relative;
+          }
+          .timeline-item {
+            display: flex;
+            align-items: center;
+            margin: 15px 0;
+          }
+          .timeline-icon {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.2em;
+            margin-right: 15px;
+          }
+          .active { background: ${statusColor}; color: white; }
+          .inactive { background: #e2e8f0; color: #a0aec0; }
+          .timeline-text { flex: 1; }
+          .timeline-text strong { display: block; margin-bottom: 5px; }
+          .timeline-text span { color: #718096; font-size: 0.9em; }
+          .info-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin: 20px 0;
+          }
+          .info-item {
+            background: #f7fafc;
+            padding: 15px;
+            border-radius: 10px;
+          }
+          .info-label {
+            font-size: 0.85em;
+            color: #718096;
+            font-weight: 700;
+            text-transform: uppercase;
+            margin-bottom: 5px;
+          }
+          .info-value {
+            color: #2d3748;
+            font-weight: 600;
+          }
+          .products {
+            background: #f7fafc;
+            padding: 20px;
+            border-radius: 10px;
+            margin: 20px 0;
+          }
+          .products h3 {
+            color: #340CA6;
+            margin: 15px 0 10px 0;
+            font-size: 1.1em;
+          }
+          .products ul {
+            list-style: none;
+            padding-left: 0;
+          }
+          .products li {
+            padding: 8px 0;
+            color: #4a5568;
+            border-bottom: 1px solid #e2e8f0;
+          }
+          .products li:last-child { border-bottom: none; }
+          .tracking-link {
+            display: inline-block;
+            background: linear-gradient(135deg, #340CA6 0%, #F20B5D 100%);
+            color: white;
+            padding: 12px 24px;
+            border-radius: 8px;
+            text-decoration: none;
+            font-weight: 700;
+            margin-top: 10px;
+          }
+          .tracking-link:hover {
+            opacity: 0.9;
+          }
+          @media (max-width: 768px) {
+            .info-grid { grid-template-columns: 1fr; }
+          }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="card">
+            <h1>🌱 Seed Request Tracker</h1>
+            <div class="tracking-code">Tracking Code: <strong>${code}</strong></div>
+            
+            <div class="status-badge">${statusIcon} ${statusText}</div>
+            
+            <div class="timeline">
+              <div class="timeline-item">
+                <div class="timeline-icon ${request.status ? 'active' : 'inactive'}">📝</div>
+                <div class="timeline-text">
+                  <strong>Submitted</strong>
+                  <span>${new Date(request.created_at).toLocaleDateString()} at ${new Date(request.created_at).toLocaleTimeString()}</span>
+                </div>
+              </div>
+              
+              <div class="timeline-item">
+                <div class="timeline-icon ${request.status === 'processing' || request.status === 'shipped' ? 'active' : 'inactive'}">🔄</div>
+                <div class="timeline-text">
+                  <strong>Processing</strong>
+                  <span>${request.status === 'processing' || request.status === 'shipped' ? 'Order being prepared' : 'Waiting to be processed'}</span>
+                </div>
+              </div>
+              
+              <div class="timeline-item">
+                <div class="timeline-icon ${request.status === 'shipped' ? 'active' : 'inactive'}">📦</div>
+                <div class="timeline-text">
+                  <strong>Shipped</strong>
+                  <span>${request.status === 'shipped' ? 'Order is on the way!' : 'Not yet shipped'}</span>
+                </div>
+              </div>
+            </div>
+            
+            <h2 style="color: #2d3748; margin: 30px 0 15px 0;">Request Details</h2>
+            
+            <div class="info-grid">
+              <div class="info-item">
+                <div class="info-label">Recipient</div>
+                <div class="info-value">${request.recipient.name}</div>
+              </div>
+              
+              <div class="info-item">
+                <div class="info-label">Email</div>
+                <div class="info-value">${request.recipient.email}</div>
+              </div>
+              
+              ${request.shopify_order_id ? `
+              <div class="info-item">
+                <div class="info-label">Order ID</div>
+                <div class="info-value">${request.shopify_order_id}</div>
+              </div>
+              ` : ''}
+              
+              ${request.tracking_number ? `
+              <div class="info-item">
+                <div class="info-label">Tracking</div>
+                <div class="info-value">${request.courier || 'Unknown'}: ${request.tracking_number}</div>
+              </div>
+              ` : ''}
+            </div>
+            
+            ${request.tracking_number && request.courier ? `
+              <a href="${getTrackingUrl(request.courier, request.tracking_number)}" target="_blank" class="tracking-link">
+                📍 Track Shipment on ${request.courier}
+              </a>
+            ` : ''}
+            
+            <div class="products">
+              <h2 style="color: #2d3748; margin: 0 0 15px 0;">Products</h2>
+              ${productsHTML || '<p>No products listed</p>'}
+            </div>
+            
+            ${request.notes ? `
+            <div class="info-item" style="margin-top: 20px;">
+              <div class="info-label">Notes</div>
+              <div class="info-value">${request.notes}</div>
+            </div>
+            ` : ''}
+          </div>
+        </div>
+      </body>
+      </html>
+    `);
+  } catch (error) {
+    console.error('Error fetching tracking info:', error);
+    res.status(500).send('Error loading tracking information');
+  }
+});
+
 // Keep existing API routes for web dashboard
 app.get('/api/requests', async (req, res) => {
   try {
@@ -945,6 +1284,7 @@ app.post('/api/requests', async (req, res) => {
   try {
     const requestData = {
       ...req.body,
+      tracking_code: generateTrackingCode(),
       created_at: new Date().toISOString(),
       status: 'pending'
     };
